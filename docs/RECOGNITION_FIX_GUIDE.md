@@ -10,7 +10,11 @@
 
 ## 根本原因
 
-**没有捕获牌型模板** → 无法进行图像匹配 → 所有牌识别为 `unknown`
+常见并发根因：
+
+1. **没有捕获牌型模板** → 无法进行图像匹配 → 所有牌识别为 `unknown`
+2. **模板尺寸与实时切图尺寸偏差较大**（如窗口缩放后）→ 匹配分普遍过低
+3. **仅靠模板匹配鲁棒性不足**（光照/特效/边缘遮挡）→ 识别波动大
 
 ---
 
@@ -68,6 +72,8 @@ tile_13_pos_13.png
 python majsoul_bot/vision_main.py --debug
 ```
 
+如果仍有较多 `unknown`，建议继续执行「高级方案：训练 NN 模型」。
+
 查看日志，应该看到：
 ```
 ✅ 识别到手牌: ['1m', '2m', '3m', '4m', '5m', ...]
@@ -112,6 +118,29 @@ python tools/capture_templates.py
 
 ---
 
+## 🧠 高级方案：训练并启用神经网络识别（推荐）
+
+当模板匹配分长期偏低（例如候选最高常在 0.3~0.6）时，建议训练 ANN 模型并与模板融合：
+
+```bash
+# 1) 使用已标注样本训练（默认含轻量增强）
+python tools/train_tile_ann.py --data-dir templates/tiles --output-model models/tile_ann.xml
+
+# 2) 启动机器人（默认会自动加载 models/tile_ann.xml）
+python majsoul_bot/vision_main.py --debug
+```
+
+可选：如果要指定自定义模型与融合参数：
+
+```bash
+python majsoul_bot/vision_main.py \
+  --nn-model-path models/tile_ann.xml \
+  --nn-fusion-weight 0.70 \
+  --nn-min-confidence 0.62
+```
+
+---
+
 ## ⚙️ 调整识别参数
 
 如果模板已存在但识别率低，编辑配置文件：
@@ -119,7 +148,10 @@ python tools/capture_templates.py
 ```yaml
 # majsoul_bot/config/config.yaml
 vision:
-  template_threshold: 0.70  # 降低阈值（默认 0.75）
+  template_threshold: 0.70  # 降低模板阈值（默认 0.75）
+  nn_enabled: true          # 启用 NN 融合识别
+  nn_fusion_weight: 0.65    # 融合权重（越大越偏向 NN）
+  nn_min_confidence: 0.58   # NN 兜底置信度
   debug_mode: true          # 开启调试模式
 ```
 

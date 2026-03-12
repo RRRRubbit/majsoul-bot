@@ -5,11 +5,12 @@
 import cv2
 import numpy as np
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from loguru import logger
 
 from ..game_logic.tile import Tile, TileType
 from .regions import ScreenRegions, DEFAULT_REGIONS
+from .tile_nn_classifier import TileNNClassifier
 
 
 # 所有 34 种牌的标准命名（与模板文件名对应）
@@ -39,6 +40,12 @@ class TileRecognizer:
         templates_dir: str = "templates/tiles",
         threshold: float = 0.75,
         regions: Optional[ScreenRegions] = None,
+        nn_enabled: bool = True,
+        nn_model_path: str = "models/tile_ann.xml",
+        nn_labels_path: Optional[str] = None,
+        nn_fusion_weight: float = 0.65,
+        nn_min_confidence: float = 0.58,
+        nn_top_k: int = 5,
     ):
         """
         Args:
@@ -51,7 +58,36 @@ class TileRecognizer:
         self.regions = regions or DEFAULT_REGIONS
         # {tile_name: template_bgr}
         self.templates: Dict[str, np.ndarray] = {}
+        # 上一次 recognize_hand 的详细结果（用于调试日志）
+        self.last_recognition_details: List[Dict[str, Any]] = []
+
+        # NN 融合参数
+        self.nn_enabled = bool(nn_enabled)
+        self.nn_model_path = nn_model_path
+        self.nn_labels_path = nn_labels_path
+        self.nn_fusion_weight = float(nn_fusion_weight)
+        self.nn_min_confidence = float(nn_min_confidence)
+        self.nn_top_k = max(1, int(nn_top_k))
+        self.nn_classifier: Optional[TileNNClassifier] = None
+
+        # recognize_tile_with_candidates() 的最近一次调试信息
+        self._last_single_recognition_meta: Dict[str, Any] = {}
+
         self._load_templates()
+
+        if self.nn_enabled:
+            self.nn_classifier = TileNNClassifier(
+                model_path=self.nn_model_path,
+                labels_path=self.nn_labels_path,
+            )
+
+    def has_nn_model(self) -> bool:
+        """是否已加载可用神经网络模型"""
+        return self.nn_classifier is not None and self.nn_classifier.available()
+
+    def has_recognition_backend(self) -> bool:
+        """是否具备任一识别能力（模板或 NN）"""
+        return self.has_templates() or self.has_nn_model()
 
     # ------------------------------------------------------------------
     # 模板加载
@@ -90,12 +126,29 @@ class TileRecognizer:
     # 单张牌识别
     # ------------------------------------------------------------------
 
-    def recognize_tile(self, tile_img: np.ndarray) -> Tuple[Optional[str], float]:
-        if not self.templates or tile_img.size == 0:
-            return None, 0.0
+    def recognize_tile_with_candidates(
+        self,
+        tile_img: np.ndarray,
+        top_k: int = 3,
+    ) -> Tuple[Optional[str], float, List[Tuple[str, float]]]:
+        """
+        识别单张牌并返回候选列表。
 
-        best_name: Optional[str] = None
-        best_score: float = -1.0
+        Returns:
+            (best_name, best_score, candidates)
+            - best_name: 得分最高的牌名（低于阈值时仍返回最高候选）
+            - best_score: 最高候选分数
+            - candidates: Top-K 候选 [(tile_name, score), ...]
+        """
+        if tile_img.size == 0:
+            return None, 0.0, []
+
+        template_score_map: Dict[str, float] = {}
+        nn_score_map: Dict[str, float] = {}
+        template_best_name: Optional[str] = None
+        template_best_score: float = 0.0
+        nn_best_name: Optional[str] = None
+        nn_best_prob: float = 0.0
 
         target_h, target_w = tile_img.shape[:2]
 
@@ -119,13 +172,72 @@ class TileRecognizer:
 
             result = cv2.matchTemplate(tile_img, resized, cv2.TM_CCOEFF_NORMED)
             _, max_val, _, _ = cv2.minMaxLoc(result)
+            score = max(0.0, float(max_val))
+            template_score_map[tile_name] = score
 
-            if max_val > best_score:
-                best_score = max_val
-                best_name = tile_name
+            if score > template_best_score:
+                template_best_score = score
+                template_best_name = tile_name
+
+        if self.has_nn_model():
+            nn_best_name, nn_best_prob, _nn_top_candidates, nn_score_map = self.nn_classifier.predict(
+                tile_img,
+                top_k=max(top_k, self.nn_top_k),
+            )
+
+        candidate_names = set(template_score_map.keys()) | set(nn_score_map.keys())
+        if not candidate_names:
+            self._last_single_recognition_meta = {
+                "template_best_name": template_best_name,
+                "template_best_score": float(template_best_score),
+                "nn_best_name": nn_best_name,
+                "nn_best_prob": float(nn_best_prob),
+                "best_name": None,
+                "best_score": 0.0,
+            }
+            return None, 0.0, []
+
+        nn_weight = self.nn_fusion_weight if self.has_nn_model() else 0.0
+        fused_score_map: Dict[str, float] = {}
+        for name in candidate_names:
+            tmpl_score = max(0.0, float(template_score_map.get(name, 0.0)))
+            nn_score = max(0.0, float(nn_score_map.get(name, 0.0)))
+            fused_score = (1.0 - nn_weight) * tmpl_score + nn_weight * nn_score
+            fused_score_map[name] = float(fused_score)
+
+        scored_candidates = sorted(
+            fused_score_map.items(),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        if top_k > 0:
+            scored_candidates = scored_candidates[:top_k]
+
+        best_name, best_score = scored_candidates[0]
+        self._last_single_recognition_meta = {
+            "template_best_name": template_best_name,
+            "template_best_score": float(template_best_score),
+            "nn_best_name": nn_best_name,
+            "nn_best_prob": float(nn_best_prob),
+            "best_name": best_name,
+            "best_score": float(best_score),
+        }
+
+        return best_name, float(best_score), scored_candidates
+
+    def recognize_tile(self, tile_img: np.ndarray) -> Tuple[Optional[str], float]:
+        """识别单张牌，返回阈值过滤后的结果（兼容旧接口）。"""
+        best_name, best_score, _ = self.recognize_tile_with_candidates(tile_img, top_k=1)
+
+        meta = self._last_single_recognition_meta or {}
+        nn_best_name = meta.get("nn_best_name")
+        nn_best_prob = float(meta.get("nn_best_prob", 0.0))
 
         if best_score >= self.threshold:
             return best_name, best_score
+
+        if nn_best_name and nn_best_prob >= self.nn_min_confidence:
+            return nn_best_name, nn_best_prob
 
         return None, best_score
 
@@ -155,6 +267,7 @@ class TileRecognizer:
         img_h, img_w = screenshot.shape[:2]
         reg = self.regions.hand
         results: List[Tuple[str, Tuple[int, int]]] = []
+        details: List[Dict[str, Any]] = []
 
         total = hand_count + (1 if has_drawn_tile else 0)
 
@@ -181,18 +294,65 @@ class TileRecognizer:
             if tile_img.size == 0:
                 continue
 
-            # 识别
-            if self.has_templates():
-                tile_name, _ = self.recognize_tile(tile_img)
-                if tile_name is None:
-                    tile_name = f"unknown_{i}"
+            meta: Dict[str, Any] = {}
+
+            # 识别（模板 / NN / 融合）
+            if self.has_recognition_backend():
+                best_name, best_score, candidates = self.recognize_tile_with_candidates(
+                    tile_img,
+                    top_k=3,
+                )
+
+                meta = self._last_single_recognition_meta or {}
+                nn_best_name = meta.get("nn_best_name")
+                nn_best_prob = float(meta.get("nn_best_prob", 0.0))
+
+                accept_reason = "below_threshold"
+                accepted = False
+
+                if best_name is not None and best_score >= self.threshold:
+                    accepted = True
+                    accept_reason = "fusion"
+                elif nn_best_name and nn_best_prob >= self.nn_min_confidence:
+                    # NN 兜底：融合分未过阈值时，允许高置信 NN 结果通过
+                    best_name = nn_best_name
+                    best_score = nn_best_prob
+                    accepted = True
+                    accept_reason = "nn_confidence"
+
+                tile_name = best_name if accepted else f"unknown_{i}"
             else:
-                # 无模板：仅记录位置
+                # 无识别后端：仅记录位置
                 tile_name = f"pos_{i}"
+                best_name = None
+                best_score = 0.0
+                candidates = []
+                accepted = False
+                accept_reason = "no_backend"
 
             center_x = x_start + (x_end - x_start) // 2
             center_y = y_start + (y_end - y_start) // 2
             results.append((tile_name, (center_x, center_y)))
+
+            details.append(
+                {
+                    "index": i,
+                    "is_drawn": is_drawn,
+                    "recognized_name": tile_name,
+                    "best_name": best_name,
+                    "best_score": float(best_score),
+                    "accepted": accepted,
+                    "accept_reason": accept_reason,
+                    "template_best_name": meta.get("template_best_name"),
+                    "template_best_score": float(meta.get("template_best_score", 0.0)),
+                    "nn_best_name": meta.get("nn_best_name"),
+                    "nn_best_score": float(meta.get("nn_best_prob", 0.0)),
+                    "candidates": candidates,
+                    "center": (center_x, center_y),
+                }
+            )
+
+        self.last_recognition_details = details
 
         return results
 

@@ -16,8 +16,36 @@ vision:
   # 模板匹配阈值（0.0~1.0，越高越严格，越低越容易误识别）
   template_threshold: 0.75
 
+  # 按钮模板匹配阈值（用于碰/吃/杠/立直/和牌按钮）
+  button_threshold: 0.72
+
   # 调试模式：开启后每隔一段时间保存带标注的截图到 logs/debug_latest.png
   debug_mode: false
+
+  # 两次点击之间的全局冷却时间（秒）
+  action_cooldown: 4.0
+
+  # 出牌后等待状态切换的超时时间（秒）
+  discard_lock_timeout: 3.0
+
+  # ── 神经网络识别（OpenCV ANN_MLP） ─────────────────────
+  # 是否启用 NN 辅助识别（与模板分做融合）
+  nn_enabled: true
+
+  # 模型文件路径（训练脚本默认输出到 models/tile_ann.xml）
+  nn_model_path: "models/tile_ann.xml"
+
+  # 标签映射路径；留空时自动使用 nn_model_path 同名 .labels.json
+  nn_labels_path: ""
+
+  # 融合权重（0~1，越大越偏向 NN，越小越偏向模板）
+  nn_fusion_weight: 0.65
+
+  # 当融合分未过 template_threshold 时，NN 兜底最低置信度
+  nn_min_confidence: 0.58
+
+  # NN 候选数量（用于融合与日志）
+  nn_top_k: 5
 
 # ────────────────────────────────────────────────
 # 鼠标控制配置
@@ -28,7 +56,7 @@ controller:
   max_delay: 2.5   # 最大延迟
 
   # 点击位置随机偏移（像素），模拟手部抖动
-  click_variance: 5
+  click_variance: 6
 
 # ────────────────────────────────────────────────
 # 游戏策略配置

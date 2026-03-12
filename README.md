@@ -10,7 +10,7 @@
 ## 核心原理
 
 ```
-截图 → OpenCV模板匹配识别手牌 → AI决策 → pyautogui模拟点击
+截图 → 模板匹配 + ANN_MLP 神经网络融合识别 → AI决策 → pyautogui模拟点击
 ```
 
 与旧版 WebSocket 方案的对比：
@@ -19,7 +19,7 @@
 |------|-----------------|----------------|
 | 连接方式 | 需逆向协议/protobuf | 直接截图，无需协议 |
 | 环境依赖 | 服务器不封锁 | 游戏窗口可见即可 |
-| 识别准确率 | 100%（协议数据） | 取决于模板质量 |
+| 识别准确率 | 100%（协议数据） | 取决于模板/训练数据质量 |
 | 适应性 | 游戏更新后失效 | 重新捕获模板即可 |
 
 ---
@@ -31,7 +31,8 @@ majsoul-bot/
 ├── majsoul_bot/
 │   ├── vision/                    # 🆕 机器视觉模块
 │   │   ├── screen_capture.py      # 屏幕截图 & 窗口检测
-│   │   ├── tile_recognizer.py     # 麻将牌识别（模板匹配）
+│   │   ├── tile_recognizer.py     # 麻将牌识别（模板 + NN 融合）
+│   │   ├── tile_nn_classifier.py  # ANN_MLP 神经网络分类器
 │   │   ├── game_state_detector.py # 游戏状态检测（按钮/轮次）
 │   │   └── regions.py             # 屏幕区域坐标定义
 │   ├── controller/                # 🆕 操作控制模块
@@ -52,9 +53,15 @@ majsoul-bot/
 │   └── buttons/                   # 操作按钮模板图片
 ├── tools/
 │   ├── capture_templates.py       # 🆕 模板捕获工具
+│   ├── train_tile_ann.py          # 🆕 训练麻将牌 ANN 模型
 │   └── calibrate_regions.py       # 🆕 区域校准工具
+├── models/                        # 🆕 训练得到的 NN 模型（可选）
+│   ├── tile_ann.xml
+│   └── tile_ann.labels.json
 ├── config/
-│   └── config.example.yaml
+│   └── config.yaml                # 运行时配置（可选）
+├── majsoul_bot/config/
+│   └── config.example.yaml        # 配置模板（复制到 config/config.yaml）
 ├── logs/                          # 日志和调试截图
 └── requirements.txt
 ```
@@ -62,6 +69,9 @@ majsoul-bot/
 ---
 
 ## 快速开始
+
+> 提示：视觉机器人配置文件位于 `config/config.yaml`（项目根目录）。
+> 可从 `majsoul_bot/config/config.example.yaml` 复制并按需修改。
 
 ### 1. 安装依赖
 
@@ -118,7 +128,22 @@ python tools/capture_templates.py
 | 索子 | `1s`~`9s` | 一索到九索 |
 | 字牌 | `1z`~`7z` | 东南西北白发中 |
 
-### 4. 启动机器人
+### 4. （可选）训练神经网络模型（提升识别率）
+
+当模板匹配识别率低（大量 unknown）时，建议训练 ANN 模型：
+
+```bash
+# 使用已标注模板训练（默认含轻量数据增强）
+python tools/train_tile_ann.py --data-dir templates/tiles --output-model models/tile_ann.xml
+```
+
+训练完成后会生成：
+- `models/tile_ann.xml`
+- `models/tile_ann.labels.json`
+
+机器人会按配置自动加载该模型并与模板分做融合。
+
+### 5. 启动机器人
 
 ```bash
 python majsoul_bot/vision_main.py
@@ -135,7 +160,21 @@ python majsoul_bot/vision_main.py --min-delay 1.5 --max-delay 3.0
 
 # 指定模板目录
 python majsoul_bot/vision_main.py --templates my_templates/
+
+# 使用指定配置文件
+python majsoul_bot/vision_main.py --config config/config.yaml
+
+# 调整识别与节奏参数
+python majsoul_bot/vision_main.py --capture-interval 0.4 --tile-threshold 0.72 --button-threshold 0.70
+
+# 显式禁用 NN，仅使用模板
+python majsoul_bot/vision_main.py --no-nn
+
+# 指定自定义 NN 模型并调整融合参数
+python majsoul_bot/vision_main.py --nn-model-path models/tile_ann.xml --nn-fusion-weight 0.70 --nn-min-confidence 0.62
 ```
+
+参数优先级：`命令行参数 > config/config.yaml > 程序内默认值`。
 
 ---
 
@@ -167,8 +206,9 @@ python majsoul_bot/vision_main.py --templates my_templates/
 
 **牌面识别**：
 - 从截图中按坐标切割每张牌的图像
-- 与 `templates/tiles/` 中的模板逐一比对
-- 取匹配得分最高且超过阈值的结果
+- 与 `templates/tiles/` 中的模板逐一比对，得到模板分
+- 可选加载 `models/tile_ann.xml` 做 NN 分类，得到概率分
+- 对模板分与 NN 概率做融合排序；必要时使用 NN 高置信兜底
 
 ---
 
@@ -214,6 +254,8 @@ type logs\vision_bot.log
 2. 适当降低匹配阈值（`template_threshold: 0.70`）
 3. 重新运行校准工具校准坐标
 4. 多捕获几张样本（特别是赤宝牌）
+5. 训练并启用 NN 模型（`python tools/train_tile_ann.py`）
+6. 在 `config/config.yaml` 中调整融合参数（`nn_fusion_weight` / `nn_min_confidence`）
 
 ### Q: 点击位置偏移？
 

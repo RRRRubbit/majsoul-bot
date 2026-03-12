@@ -3,9 +3,10 @@
 使用 pydantic 进行配置验证和管理
 """
 from pathlib import Path
-from typing import List, Tuple
+from typing import Tuple
+
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class AccountConfig(BaseModel):
@@ -30,18 +31,78 @@ class GameConfig(BaseModel):
         description="操作延迟范围（秒）"
     )
     match_mode: int = Field(default=1, description="匹配模式：1-铜之间，2-银之间，3-金之间")
+    prefer_riichi: bool = Field(default=True, description="是否优先保持门前清/立直")
+
+
+class VisionConfig(BaseModel):
+    """机器视觉模式配置"""
+
+    templates_dir: str = Field(default="templates", description="模板根目录")
+    capture_interval: float = Field(default=0.5, ge=0.05, le=5.0, description="截图间隔（秒）")
+    template_threshold: float = Field(default=0.75, ge=0.0, le=1.0, description="牌面模板匹配阈值")
+    button_threshold: float = Field(default=0.72, ge=0.0, le=1.0, description="按钮模板匹配阈值")
+    debug_mode: bool = Field(default=False, description="是否开启调试模式")
+    action_cooldown: float = Field(default=4.0, ge=0.0, le=10.0, description="操作冷却时间（秒）")
+    discard_lock_timeout: float = Field(
+        default=3.0,
+        ge=0.0,
+        le=10.0,
+        description="出牌锁超时时间（秒）",
+    )
+
+    # 神经网络识别配置（OpenCV ANN_MLP）
+    nn_enabled: bool = Field(default=True, description="是否启用神经网络辅助识别")
+    nn_model_path: str = Field(default="models/tile_ann.xml", description="NN 模型文件路径")
+    nn_labels_path: str = Field(
+        default="",
+        description="NN 标签文件路径（为空时使用模型同名 .labels.json）",
+    )
+    nn_fusion_weight: float = Field(
+        default=0.65,
+        ge=0.0,
+        le=1.0,
+        description="模板分与 NN 概率融合权重（越大越偏向 NN）",
+    )
+    nn_min_confidence: float = Field(
+        default=0.58,
+        ge=0.0,
+        le=1.0,
+        description="NN 兜底识别最小置信度（融合分不足时可单独通过）",
+    )
+    nn_top_k: int = Field(
+        default=5,
+        ge=1,
+        le=34,
+        description="NN 候选数量（用于融合与日志）",
+    )
+
+
+class ControllerConfig(BaseModel):
+    """输入控制配置（鼠标/键盘）"""
+
+    min_delay: float = Field(default=1.0, ge=0.0, le=10.0, description="最小操作延迟（秒）")
+    max_delay: float = Field(default=2.5, ge=0.0, le=10.0, description="最大操作延迟（秒）")
+    click_variance: int = Field(default=6, ge=0, le=50, description="点击像素随机偏移")
+
+    @model_validator(mode="after")
+    def _validate_delay_range(self) -> "ControllerConfig":
+        if self.min_delay > self.max_delay:
+            raise ValueError("controller.min_delay 不能大于 controller.max_delay")
+        return self
 
 
 class LoggingConfig(BaseModel):
     """日志配置"""
     level: str = Field(default="INFO", description="日志级别")
-    file: str = Field(default="logs/bot.log", description="日志文件路径")
+    file: str = Field(default="logs/vision_bot.log", description="日志文件路径")
 
 
 class Settings(BaseModel):
     """主配置类"""
     account: AccountConfig = Field(default_factory=AccountConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
+    vision: VisionConfig = Field(default_factory=VisionConfig)
+    controller: ControllerConfig = Field(default_factory=ControllerConfig)
     game: GameConfig = Field(default_factory=GameConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
@@ -65,7 +126,7 @@ class Settings(BaseModel):
         if not path.exists():
             raise FileNotFoundError(
                 f"配置文件不存在: {config_path}\n"
-                f"请复制 config/config.example.yaml 到 config/config.yaml 并填写配置"
+                "请创建 config/config.yaml（可参考 majsoul_bot/config/config.example.yaml）"
             )
 
         try:

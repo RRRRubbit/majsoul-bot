@@ -27,6 +27,7 @@ _project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(_project_root))
 
 from majsoul_bot.ai import SimpleAI
+from majsoul_bot.config import Settings
 from majsoul_bot.controller import MouseController
 from majsoul_bot.game_logic import Hand, MahjongRules
 from majsoul_bot.game_logic.tile import Tile
@@ -70,6 +71,7 @@ class VisionBot:
     # 打牌之后的额外等待时间（秒），等游戏状态切换才允许再次打牌
     # 防止：点击打牌 → 状态未变 → 反复点击同一张牌
     DISCARD_LOCK_TIMEOUT = 3.0
+
     # 主循环截图间隔（秒）
     CAPTURE_INTERVAL = 0.5
 
@@ -79,34 +81,73 @@ class VisionBot:
         templates_dir: str = "templates",
         min_delay: float = 1.0,
         max_delay: float = 2.5,
+        click_variance: int = 6,
+        capture_interval: float = 0.5,
+        tile_threshold: float = 0.75,
+        button_threshold: float = 0.72,
+        action_cooldown: float = 4.0,
+        discard_lock_timeout: float = 3.0,
+        nn_enabled: bool = True,
+        nn_model_path: str = "models/tile_ann.xml",
+        nn_labels_path: Optional[str] = None,
+        nn_fusion_weight: float = 0.65,
+        nn_min_confidence: float = 0.58,
+        nn_top_k: int = 5,
+        log_level: str = "INFO",
+        log_file: str = "logs/vision_bot.log",
     ):
         """
         Args:
             debug: 是否开启调试模式（保存带标注的截图到 logs/）
             templates_dir: 模板根目录
             min_delay, max_delay: 操作延迟范围（秒）
+            click_variance: 点击随机偏移像素
+            capture_interval: 主循环截图间隔（秒）
+            tile_threshold: 牌面模板匹配阈值
+            button_threshold: 按钮模板匹配阈值
+            action_cooldown: 两次操作间冷却时间（秒）
+            discard_lock_timeout: 出牌后等待状态切换超时（秒）
+            nn_enabled: 是否启用神经网络辅助识别
+            nn_model_path: 神经网络模型路径
+            nn_labels_path: 神经网络标签路径（None 时自动推断）
+            nn_fusion_weight: 融合权重（越高越偏向 NN）
+            nn_min_confidence: NN 兜底最小置信度
+            nn_top_k: NN 候选数量
+            log_level: 日志等级
+            log_file: 日志文件路径
         """
         # ── 日志 ──
         os.makedirs("logs", exist_ok=True)
-        setup_logger(log_level="INFO", log_file="logs/vision_bot.log")
+        setup_logger(log_level=log_level, log_file=log_file)
         self.logger = get_logger()
 
         self.debug = debug
+        self.CAPTURE_INTERVAL = capture_interval
+        self.ACTION_COOLDOWN = action_cooldown
+        self.DISCARD_LOCK_TIMEOUT = discard_lock_timeout
 
         # ── 视觉组件 ──
         self.screen_capture = ScreenCapture()
         self.tile_recognizer = TileRecognizer(
-            templates_dir=f"{templates_dir}/tiles"
+            templates_dir=f"{templates_dir}/tiles",
+            threshold=tile_threshold,
+            nn_enabled=nn_enabled,
+            nn_model_path=nn_model_path,
+            nn_labels_path=nn_labels_path,
+            nn_fusion_weight=nn_fusion_weight,
+            nn_min_confidence=nn_min_confidence,
+            nn_top_k=nn_top_k,
         )
         self.game_state_detector = GameStateDetector(
-            templates_dir=f"{templates_dir}/buttons"
+            templates_dir=f"{templates_dir}/buttons",
+            threshold=button_threshold,
         )
 
         # ── 控制器 ──
         self.mouse = MouseController(
             min_delay=min_delay,
             max_delay=max_delay,
-            click_variance=6,
+            click_variance=click_variance,
         )
 
         # ── 游戏逻辑 ──
@@ -137,12 +178,15 @@ class VisionBot:
         self.logger.info("🀄 雀魂视觉机器人  (machine-vision mode)")
         self.logger.info("=" * 60)
 
-        if not self.tile_recognizer.has_templates():
+        if not self.tile_recognizer.has_recognition_backend():
             self.logger.warning(
-                "⚠  未检测到牌型模板！\n"
+                "⚠  未检测到可用识别后端（模板 / NN）！\n"
                 "   机器人将以「仅位置」模式运行（无法识别具体牌面）。\n"
-                "   → 运行 python tools/capture_templates.py 来生成模板。"
+                "   → 可先运行 python tools/capture_templates.py 捕获模板，\n"
+                "     或训练并放置 models/tile_ann.xml 模型。"
             )
+        elif not self.tile_recognizer.has_templates() and self.tile_recognizer.has_nn_model():
+            self.logger.warning("⚠  未检测到模板，当前使用 NN-only 识别模式")
 
         # 尝试定位游戏窗口
         found = self.screen_capture.find_game_window()
@@ -154,7 +198,17 @@ class VisionBot:
 
         self.logger.info(
             f"调试模式: {'ON' if self.debug else 'OFF'} | "
-            f"模板: {len(self.tile_recognizer.templates)} 张牌"
+            f"模板: {len(self.tile_recognizer.templates)} 张牌 | "
+            f"NN: {'ON' if self.tile_recognizer.has_nn_model() else 'OFF'}"
+        )
+        self.logger.info(
+            "运行参数: "
+            f"capture_interval={self.CAPTURE_INTERVAL:.2f}s, "
+            f"tile_threshold={self.tile_recognizer.threshold:.2f}, "
+            f"button_threshold={self.game_state_detector.threshold:.2f}, "
+            f"nn_fusion={self.tile_recognizer.nn_fusion_weight:.2f}, "
+            f"nn_min_conf={self.tile_recognizer.nn_min_confidence:.2f}, "
+            f"cooldown={self.ACTION_COOLDOWN:.2f}s"
         )
         self.logger.info("按 Ctrl+C 停止机器人")
         self.logger.info("-" * 60)
@@ -321,13 +375,20 @@ class VisionBot:
             return
         else:
             self.logger.info(f"识别到手牌: {[name for name, _ in recognized]}")
+            self._log_candidate_tiles_for_unknown()
         # 2. 根据识别结果更新 AI 手牌
         drawn_tile = self._build_hand_from_recognized(recognized, state.has_drawn_tile)
 
         if self.hand.get_tile_count() == 0:
             # ── 无模板「位置模式」回退 ──
             # 没有牌面识别信息，但有像素位置，直接点击
-            self.logger.info("⚠  无模板：使用视觉聚类/位置模式打牌")
+            if self.tile_recognizer.has_recognition_backend():
+                self.logger.warning(
+                    "⚠  手牌未识别到可用牌型（模板/NN均未通过阈值，已输出候选牌型），"
+                    "使用视觉聚类/位置模式打牌"
+                )
+            else:
+                self.logger.info("⚠  无模板且无NN模型：使用视觉聚类/位置模式打牌")
             pos = self._pick_position_fallback(recognized, state.has_drawn_tile, screenshot)
             if pos:
                 pix_x, pix_y = pos
@@ -380,6 +441,54 @@ class VisionBot:
         else:
             self.logger.error("无法确定点击位置")
             self._mark_action()  # 防止卡死
+
+    def _log_candidate_tiles_for_unknown(self):
+        """
+        输出 unknown 牌位的候选牌型。
+
+        依赖 TileRecognizer 在 recognize_hand() 后写入
+        self.tile_recognizer.last_recognition_details。
+        """
+        details = getattr(self.tile_recognizer, "last_recognition_details", None)
+        if not details:
+            return
+
+        unknown_details = [
+            d for d in details if str(d.get("recognized_name", "")).startswith("unknown_")
+        ]
+        if not unknown_details:
+            return
+
+        self.logger.info(
+            f"候选牌型（阈值={self.tile_recognizer.threshold:.2f}，仅展示未通过阈值的牌位）:"
+        )
+        for item in unknown_details:
+            idx = int(item.get("index", -1))
+            is_drawn = bool(item.get("is_drawn", False))
+            best_score = float(item.get("best_score", 0.0))
+            candidates = item.get("candidates", []) or []
+            accept_reason = str(item.get("accept_reason", "below_threshold"))
+            tpl_name = item.get("template_best_name")
+            tpl_score = float(item.get("template_best_score", 0.0))
+            nn_name = item.get("nn_best_name")
+            nn_score = float(item.get("nn_best_score", 0.0))
+
+            slot = "摸牌位" if is_drawn else f"手牌[{idx}]"
+            if candidates:
+                cand_text = ", ".join(
+                    f"{name}({score:.3f})" for name, score in candidates
+                )
+            else:
+                cand_text = "无可用候选"
+
+            backend_info = (
+                f"tmpl={tpl_name or '-'}({tpl_score:.3f}) "
+                f"nn={nn_name or '-'}({nn_score:.3f})"
+            )
+
+            self.logger.info(
+                f"   - {slot}: {cand_text} | best={best_score:.3f} | {backend_info} | reason={accept_reason}"
+            )
 
     # ------------------------------------------------------------------
     # 辅助方法
@@ -557,22 +666,137 @@ class VisionBot:
 def parse_args():
     import argparse
     p = argparse.ArgumentParser(description="雀魂机器视觉机器人")
-    p.add_argument("--debug", action="store_true", help="开启调试模式（保存标注截图）")
-    p.add_argument("--templates", default="templates", help="模板根目录（默认：templates）")
-    p.add_argument("--min-delay", type=float, default=1.0, help="操作最小延迟（秒）")
-    p.add_argument("--max-delay", type=float, default=2.5, help="操作最大延迟（秒）")
+    p.add_argument(
+        "--config",
+        default="config/config.yaml",
+        help="配置文件路径（不存在时自动使用内置默认值）",
+    )
+
+    debug_group = p.add_mutually_exclusive_group()
+    debug_group.add_argument("--debug", dest="debug", action="store_true", help="开启调试模式（覆盖配置）")
+    debug_group.add_argument("--no-debug", dest="debug", action="store_false", help="关闭调试模式（覆盖配置）")
+    p.set_defaults(debug=None)
+
+    p.add_argument("--templates", default=None, help="模板根目录（覆盖配置）")
+    p.add_argument("--min-delay", type=float, default=None, help="操作最小延迟（秒，覆盖配置）")
+    p.add_argument("--max-delay", type=float, default=None, help="操作最大延迟（秒，覆盖配置）")
+    p.add_argument("--click-variance", type=int, default=None, help="点击偏移像素（覆盖配置）")
+
+    p.add_argument("--capture-interval", type=float, default=None, help="主循环截图间隔（秒，覆盖配置）")
+    p.add_argument("--tile-threshold", type=float, default=None, help="牌面模板匹配阈值（0~1，覆盖配置）")
+    p.add_argument("--button-threshold", type=float, default=None, help="按钮模板匹配阈值（0~1，覆盖配置）")
+    p.add_argument("--action-cooldown", type=float, default=None, help="操作冷却时长（秒，覆盖配置）")
+    p.add_argument("--discard-lock-timeout", type=float, default=None, help="出牌锁超时时长（秒，覆盖配置）")
+
+    nn_group = p.add_mutually_exclusive_group()
+    nn_group.add_argument("--nn", dest="nn_enabled", action="store_true", help="启用 NN 识别（覆盖配置）")
+    nn_group.add_argument("--no-nn", dest="nn_enabled", action="store_false", help="禁用 NN 识别（覆盖配置）")
+    p.set_defaults(nn_enabled=None)
+
+    p.add_argument("--nn-model-path", type=str, default=None, help="NN 模型路径（覆盖配置）")
+    p.add_argument("--nn-labels-path", type=str, default=None, help="NN 标签路径（覆盖配置）")
+    p.add_argument("--nn-fusion-weight", type=float, default=None, help="NN 融合权重（0~1，覆盖配置）")
+    p.add_argument("--nn-min-confidence", type=float, default=None, help="NN 兜底最小置信度（0~1，覆盖配置）")
+    p.add_argument("--nn-top-k", type=int, default=None, help="NN 候选数量（>=1，覆盖配置）")
+
     return p.parse_args()
+
+
+def _load_settings_or_default(config_path: str) -> Settings:
+    """
+    加载配置文件；若不存在或格式错误则回退为默认配置。
+    """
+    try:
+        settings = Settings.load_from_yaml(config_path)
+        print(f"已加载配置文件: {config_path}")
+        return settings
+    except FileNotFoundError:
+        print(f"未找到配置文件 {config_path}，使用内置默认参数运行。")
+        return Settings()
+    except ValueError as e:
+        print(f"配置文件无效（{e}），使用内置默认参数运行。")
+        return Settings()
+
+
+def _resolve_option(cli_value, config_value):
+    """命令行参数优先，其次配置文件值。"""
+    return config_value if cli_value is None else cli_value
+
+
+def _build_bot_from_args(args) -> VisionBot:
+    settings = _load_settings_or_default(args.config)
+    vision_cfg = settings.vision
+    controller_cfg = settings.controller
+
+    debug = _resolve_option(args.debug, vision_cfg.debug_mode)
+    templates_dir = _resolve_option(args.templates, vision_cfg.templates_dir)
+    min_delay = _resolve_option(args.min_delay, controller_cfg.min_delay)
+    max_delay = _resolve_option(args.max_delay, controller_cfg.max_delay)
+    click_variance = _resolve_option(args.click_variance, controller_cfg.click_variance)
+    capture_interval = _resolve_option(args.capture_interval, vision_cfg.capture_interval)
+    tile_threshold = _resolve_option(args.tile_threshold, vision_cfg.template_threshold)
+    button_threshold = _resolve_option(args.button_threshold, vision_cfg.button_threshold)
+    action_cooldown = _resolve_option(args.action_cooldown, vision_cfg.action_cooldown)
+    discard_lock_timeout = _resolve_option(
+        args.discard_lock_timeout,
+        vision_cfg.discard_lock_timeout,
+    )
+    nn_enabled = _resolve_option(args.nn_enabled, vision_cfg.nn_enabled)
+    nn_model_path = _resolve_option(args.nn_model_path, vision_cfg.nn_model_path)
+    nn_labels_path = _resolve_option(args.nn_labels_path, vision_cfg.nn_labels_path)
+    nn_fusion_weight = _resolve_option(args.nn_fusion_weight, vision_cfg.nn_fusion_weight)
+    nn_min_confidence = _resolve_option(args.nn_min_confidence, vision_cfg.nn_min_confidence)
+    nn_top_k = _resolve_option(args.nn_top_k, vision_cfg.nn_top_k)
+
+    if isinstance(nn_labels_path, str) and not nn_labels_path.strip():
+        nn_labels_path = None
+
+    if min_delay > max_delay:
+        raise ValueError("参数错误：min_delay 不能大于 max_delay")
+    if click_variance < 0:
+        raise ValueError("参数错误：click_variance 不能小于 0")
+    if capture_interval <= 0:
+        raise ValueError("参数错误：capture_interval 必须大于 0")
+    if not (0.0 <= tile_threshold <= 1.0):
+        raise ValueError("参数错误：tile_threshold 必须在 [0, 1] 区间")
+    if not (0.0 <= button_threshold <= 1.0):
+        raise ValueError("参数错误：button_threshold 必须在 [0, 1] 区间")
+    if not (0.0 <= nn_fusion_weight <= 1.0):
+        raise ValueError("参数错误：nn_fusion_weight 必须在 [0, 1] 区间")
+    if not (0.0 <= nn_min_confidence <= 1.0):
+        raise ValueError("参数错误：nn_min_confidence 必须在 [0, 1] 区间")
+    if int(nn_top_k) < 1:
+        raise ValueError("参数错误：nn_top_k 必须 >= 1")
+    if action_cooldown < 0 or discard_lock_timeout < 0:
+        raise ValueError("参数错误：冷却时间参数不能小于 0")
+
+    return VisionBot(
+        debug=debug,
+        templates_dir=templates_dir,
+        min_delay=min_delay,
+        max_delay=max_delay,
+        click_variance=click_variance,
+        capture_interval=capture_interval,
+        tile_threshold=tile_threshold,
+        button_threshold=button_threshold,
+        action_cooldown=action_cooldown,
+        discard_lock_timeout=discard_lock_timeout,
+        nn_enabled=bool(nn_enabled),
+        nn_model_path=nn_model_path,
+        nn_labels_path=nn_labels_path,
+        nn_fusion_weight=float(nn_fusion_weight),
+        nn_min_confidence=float(nn_min_confidence),
+        nn_top_k=int(nn_top_k),
+        log_level=settings.logging.level,
+        log_file=settings.logging.file,
+    )
 
 
 def main():
     args = parse_args()
-    bot = VisionBot(
-        debug=args.debug,
-        templates_dir=args.templates,
-        min_delay=args.min_delay,
-        max_delay=args.max_delay,
-    )
+
     try:
+        bot = _build_bot_from_args(args)
         asyncio.run(bot.start())
     except KeyboardInterrupt:
         print("\n已停止")
