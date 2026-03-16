@@ -175,7 +175,7 @@ def run(src_dir: str, out_dir: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="批量标注已提取的手牌图像")
-    parser.add_argument("--src", default="templates/tiles/raw",
+    parser.add_argument("--src", default="templates/tiles",
                         help="原始牌图目录（默认: templates/tiles/raw）")
     parser.add_argument("--out", default="templates/tiles",
                         help="输出模板目录（默认: templates/tiles）")

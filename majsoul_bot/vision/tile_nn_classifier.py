@@ -18,17 +18,31 @@ import numpy as np
 from loguru import logger
 
 
+# 统一使用项目根目录作为路径起点
+# 当前文件: <project_root>/majsoul_bot/vision/tile_nn_classifier.py
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_MODEL_PATH = PROJECT_ROOT / "models" / "tile_ann.xml"
+
+
+def _resolve_project_path(path_value: str | Path) -> Path:
+    """将路径解析为绝对路径：相对路径统一以项目根目录为起点。"""
+    p = Path(path_value)
+    return p if p.is_absolute() else (PROJECT_ROOT / p)
+
+
 class TileNNClassifier:
     """基于 OpenCV ANN_MLP 的牌型分类器"""
 
     def __init__(
         self,
-        model_path: str = "models/tile_ann.xml",
+        model_path: str = str(DEFAULT_MODEL_PATH),
         labels_path: Optional[str] = None,
     ):
-        self.model_path = Path(model_path)
+        self.model_path = _resolve_project_path(model_path)
         self.labels_path = (
-            Path(labels_path) if labels_path else self.model_path.with_suffix(".labels.json")
+            _resolve_project_path(labels_path)
+            if labels_path
+            else self.model_path.with_suffix(".labels.json")
         )
 
         self.model: Optional[cv2.ml.ANN_MLP] = None

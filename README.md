@@ -135,6 +135,13 @@ python tools/capture_templates.py
 ```bash
 # 使用已标注模板训练（默认含轻量数据增强）
 python tools/train_tile_ann.py --data-dir templates/tiles --output-model models/tile_ann.xml
+
+# 默认会输出训练细节（网络结构、训练参数、进行中耗时）
+# 可调节训练中日志频率
+python tools/train_tile_ann.py --data-dir templates/tiles --train-log-interval 1.0
+
+# 若只想保留关键结果输出
+python tools/train_tile_ann.py --data-dir templates/tiles --quiet
 ```
 
 训练完成后会生成：
@@ -171,10 +178,20 @@ python majsoul_bot/vision_main.py --capture-interval 0.4 --tile-threshold 0.72 -
 python majsoul_bot/vision_main.py --no-nn
 
 # 指定自定义 NN 模型并调整融合参数
-python majsoul_bot/vision_main.py --nn-model-path models/tile_ann.xml --nn-fusion-weight 0.70 --nn-min-confidence 0.62
+python majsoul_bot/vision_main.py --nn-model-path models/tile_ann.xml --nn-fusion-weight 0.90 --nn-min-confidence 0.62
 ```
 
 参数优先级：`命令行参数 > config/config.yaml > 程序内默认值`。
+
+启动自动化说明（浏览器 + 登录填充）：
+- 启动机器人时会按配置自动打开 `vision.browser_url`（默认雀魂地址）。
+- 如需指定浏览器程序，可配置 `vision.browser_executable`（留空则使用系统默认浏览器）。
+- 若设置 `vision.login_auto_fill: true`，并在 `account.username/password` 提供账号密码，
+  机器人检测到登录页后会尝试自动填充并回车提交。
+
+NN 优先识别说明：
+- 默认启用 `vision.nn_priority: true`，手牌识别会优先采用 NN 结果。
+- 同时默认 `nn_fusion_weight: 0.90`，进一步提高 NN 在融合排序中的权重。
 
 ---
 

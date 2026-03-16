@@ -49,6 +49,7 @@ class VisionConfig(BaseModel):
         le=10.0,
         description="出牌锁超时时间（秒）",
     )
+    discard_lock_enabled: bool = Field(default=False, description="是否启用打牌锁，防止重复点击")
 
     # 神经网络识别配置（OpenCV ANN_MLP）
     nn_enabled: bool = Field(default=True, description="是否启用神经网络辅助识别")
@@ -58,7 +59,7 @@ class VisionConfig(BaseModel):
         description="NN 标签文件路径（为空时使用模型同名 .labels.json）",
     )
     nn_fusion_weight: float = Field(
-        default=0.65,
+        default=0.90,
         ge=0.0,
         le=1.0,
         description="模板分与 NN 概率融合权重（越大越偏向 NN）",
@@ -74,6 +75,48 @@ class VisionConfig(BaseModel):
         ge=1,
         le=34,
         description="NN 候选数量（用于融合与日志）",
+    )
+    nn_priority: bool = Field(default=True, description="是否启用 NN 优先识别策略")
+
+    # 窗口策略（Windows + pygetwindow）
+    auto_topmost: bool = Field(default=True, description="自动激活并置顶游戏窗口")
+    lock_resolution: bool = Field(default=True, description="是否锁定游戏窗口分辨率")
+    lock_width: int = Field(default=800, ge=0, le=10000, description="锁定宽度（0 表示使用首次检测尺寸）")
+    lock_height: int = Field(default=600, ge=0, le=10000, description="锁定高度（0 表示使用首次检测尺寸）")
+
+    # 浏览器启动与登录辅助
+    browser_auto_open: bool = Field(default=True, description="启动时自动检测浏览器并导航到雀魂网址")
+    browser_url: str = Field(default="https://game.maj-soul.com/1/", description="启动后自动打开/跳转的网址")
+    browser_executable: str = Field(
+        default="",
+        description="浏览器可执行文件路径（为空时使用系统默认浏览器）",
+    )
+    browser_wait_seconds: float = Field(
+        default=2.0,
+        ge=0.0,
+        le=30.0,
+        description="浏览器跳转后的等待时间（秒）",
+    )
+    login_auto_fill: bool = Field(default=False, description="检测到登录页时是否自动输入账号密码")
+
+    # 运行时自动样本收集（用于后续训练）
+    auto_collect_dataset: bool = Field(default=False, description="运行时是否按识别结果自动保存训练样本")
+    auto_collect_dir: str = Field(default="datasets/auto", description="自动收集样本输出目录")
+    auto_collect_min_score: float = Field(
+        default=0.93,
+        ge=0.0,
+        le=1.0,
+        description="自动收集最小置信度阈值（best_score）",
+    )
+    auto_collect_include_unknown: bool = Field(
+        default=False,
+        description="是否收集 unknown_* 牌位（保存到 unknown 类）",
+    )
+    auto_collect_max_per_label: int = Field(
+        default=2000,
+        ge=0,
+        le=100000,
+        description="每个标签最多自动保存样本数（0 表示不限制）",
     )
 
 

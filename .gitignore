@@ -83,3 +83,21 @@ data/
 *.zip
 *.tar.gz
 *.rar
+
+# 图片文件
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.ico
+*.svg
+
+# YOLO数据集和模型
+yolo_dataset/
+*.pt
+*.weights
+
+# 临时调试文件
+debug_*.png
+debug_*.jpg

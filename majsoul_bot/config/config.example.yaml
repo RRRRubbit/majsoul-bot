@@ -11,7 +11,7 @@ vision:
   templates_dir: "templates"
 
   # 截图间隔（秒）- 主循环每隔此时间截一次图
-  capture_interval: 0.5
+  capture_interval: 0.3  # 优化：从0.5降至0.3，更快响应游戏状态
 
   # 模板匹配阈值（0.0~1.0，越高越严格，越低越容易误识别）
   template_threshold: 0.75
@@ -23,10 +23,13 @@ vision:
   debug_mode: false
 
   # 两次点击之间的全局冷却时间（秒）
-  action_cooldown: 4.0
+  action_cooldown: 1.5  # 优化：从4.0降至1.5，大幅加快响应速度
 
   # 出牌后等待状态切换的超时时间（秒）
-  discard_lock_timeout: 3.0
+  discard_lock_timeout: 2.0  # 优化：从3.0降至2.0
+
+  # 是否启用打牌锁（默认关闭，避免在可吃/碰等状态下误卡住）
+  discard_lock_enabled: false
 
   # ── 神经网络识别（OpenCV ANN_MLP） ─────────────────────
   # 是否启用 NN 辅助识别（与模板分做融合）
@@ -39,7 +42,10 @@ vision:
   nn_labels_path: ""
 
   # 融合权重（0~1，越大越偏向 NN，越小越偏向模板）
-  nn_fusion_weight: 0.65
+  nn_fusion_weight: 0.90
+
+  # NN 优先策略（启用后优先采用 NN 识别结果）
+  nn_priority: true
 
   # 当融合分未过 template_threshold 时，NN 兜底最低置信度
   nn_min_confidence: 0.58
@@ -47,13 +53,57 @@ vision:
   # NN 候选数量（用于融合与日志）
   nn_top_k: 5
 
+  # ── 窗口策略（Windows + pygetwindow） ───────────────────
+  # 自动激活并置顶游戏窗口（建议开启，避免焦点丢失）
+  auto_topmost: true
+
+  # 锁定窗口分辨率（建议开启，避免识别区域因为缩放漂移）
+  lock_resolution: true
+
+  # 锁定尺寸（默认固定为 800x600）
+  # 若想改为“按首次检测尺寸锁定”，可将两项都设为 0
+  lock_width: 800
+  lock_height: 600
+
+  # ── 启动自动化（浏览器/登录） ─────────────────────────────
+  # 启动时自动检测浏览器并跳转到雀魂页面
+  browser_auto_open: true
+
+  # 自动打开的网址
+  browser_url: "https://game.maj-soul.com/1/"
+
+  # 浏览器可执行文件路径（留空=系统默认浏览器）
+  browser_executable: ""
+
+  # 打开网址后等待秒数（用于页面加载与窗口激活）
+  browser_wait_seconds: 2.0
+
+  # 检测到登录页时，是否自动输入 account.username / account.password 并回车提交
+  login_auto_fill: false
+
+  # ── 运行时自动收集数据集（用于后续训练） ───────────────────
+  # 是否按识别结果自动保存牌图到数据集目录
+  auto_collect_dataset: ture
+
+  # 自动收集输出目录（会按牌名建子目录，如 datasets/auto/1m/*.png）
+  auto_collect_dir: "datasets/auto"
+
+  # 自动保存最小置信度（best_score）
+  auto_collect_min_score: 0.93
+
+  # 是否保存 unknown_* 牌位（保存到 unknown 子目录）
+  auto_collect_include_unknown: false
+
+  # 每个标签最多保存样本数（0=不限制）
+  auto_collect_max_per_label: 2000
+
 # ────────────────────────────────────────────────
 # 鼠标控制配置
 # ────────────────────────────────────────────────
 controller:
   # 每次操作前的随机等待时间范围（秒），模拟人类思考时间
-  min_delay: 1.0   # 最小延迟
-  max_delay: 2.5   # 最大延迟
+  min_delay: 0.3   # 最小延迟（优化：从1.0降至0.3，加快出牌）
+  max_delay: 0.8   # 最大延迟（优化：从2.5降至0.8，加快出牌）
 
   # 点击位置随机偏移（像素），模拟手部抖动
   click_variance: 6
@@ -82,9 +132,10 @@ logging:
 # ────────────────────────────────────────────────
 # 以下为旧版 WebSocket 配置（已废弃，保留仅供参考）
 # ────────────────────────────────────────────────
-# account:
-#   username: ""
-#   password: ""
+account:
+  # 可选：用于登录页自动填充（需 vision.login_auto_fill=true）
+  username: ""
+  password: ""
 # server:
 #   host: "game.maj-soul.com"
 #   port: 443

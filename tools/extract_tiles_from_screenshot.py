@@ -195,8 +195,8 @@ def batch_extract_no_label(screenshot_path: str, out_dir: str = "templates/tiles
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="从雀魂截图提取手牌模板")
-    parser.add_argument("screenshot", nargs="?", default="logs/debug_latest.png",
-                        help="截图路径（默认: logs/debug_latest.png）")
+    parser.add_argument("screenshot", nargs="?", default="logs/capture_preview.png",
+                        help="截图路径（默认: logs/capture_preview.png）")
     parser.add_argument("--out", default="templates/tiles",
                         help="输出目录（默认: templates/tiles）")
     parser.add_argument("--batch", action="store_true",

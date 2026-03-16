@@ -104,6 +104,7 @@ class TestTile:
         assert Tile(TileType.SOU, 9).get_display_name() == "9索"
         assert Tile(TileType.HONOR, 1).get_display_name() == "东"
         assert Tile(TileType.HONOR, 5).get_display_name() == "白"
+        assert Tile(TileType.HONOR, 7).get_display_name() == "中"
 
     def test_from_string(self):
         """测试从字符串创建牌"""
@@ -115,6 +116,11 @@ class TestTile:
         assert tile_aka.tile_type == TileType.PIN
         assert tile_aka.value == 5
         assert tile_aka.aka
+
+        tile_red_short = Tile.from_string("0m")
+        assert tile_red_short.tile_type == TileType.MAN
+        assert tile_red_short.value == 5
+        assert tile_red_short.aka
 
     def test_from_string_invalid(self):
         """测试无效字符串"""
@@ -144,6 +150,14 @@ class TestParseTiles:
         assert sum(1 for t in tiles if t.tile_type == TileType.MAN) == 3
         assert sum(1 for t in tiles if t.tile_type == TileType.PIN) == 3
         assert sum(1 for t in tiles if t.tile_type == TileType.SOU) == 3
+
+    def test_parse_compact_with_red_dora_zero(self):
+        """测试紧凑格式中的 0 表示赤五。"""
+        tiles = parse_tiles("406m")
+        assert len(tiles) == 3
+        assert tiles[0].value == 4 and not tiles[0].aka
+        assert tiles[1].value == 5 and tiles[1].aka
+        assert tiles[2].value == 6 and not tiles[2].aka
 
     def test_parse_space_separated(self):
         """测试空格分隔格式解析"""

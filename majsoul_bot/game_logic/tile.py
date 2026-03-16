@@ -3,7 +3,7 @@
 定义麻将牌的类型、表示和转换方法
 """
 from enum import Enum
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 
 class TileType(Enum):
@@ -118,7 +118,7 @@ class Tile:
         elif self.tile_type == TileType.HONOR:
             honor_names = {
                 1: "东", 2: "南", 3: "西", 4: "北",
-                5: "中", 6: "发", 7: "白"
+                5: "白", 6: "发", 7: "中"
             }
             return honor_names[self.value]
         return str(self)
@@ -146,6 +146,11 @@ class Tile:
         aka = 'r' in tile_str
         tile_str = tile_str.replace('r', '')
 
+        # 兼容赤宝简写：0m/0p/0s -> 5m/5p/5s 且 aka=True
+        if len(tile_str) == 2 and tile_str[0] == '0' and tile_str[1] in {'m', 'p', 's'}:
+            tile_str = f"5{tile_str[1]}"
+            aka = True
+
         # 解析数值和类型
         try:
             value = int(tile_str[0])
@@ -162,7 +167,7 @@ def parse_tiles(tiles_str: str) -> List[Tile]:
     从字符串解析多张牌
 
     支持格式：
-    - "123m456p789s1234567z" (紧凑格式)
+    - "123m406p789s1234567z" (紧凑格式，0 表示赤五)
     - "1m 2m 3m 4p 5p 6p" (空格分隔)
 
     Args:
@@ -181,14 +186,20 @@ def parse_tiles(tiles_str: str) -> List[Tile]:
         return tiles
 
     # 紧凑格式
-    current_values = []
+    current_values: List[Tuple[int, bool]] = []
     for char in tiles_str:
         if char.isdigit():
-            current_values.append(int(char))
+            val = int(char)
+            if val == 0:
+                # 紧凑格式中的 0 表示赤宝 5（仅 m/p/s 合法）
+                current_values.append((5, True))
+            else:
+                current_values.append((val, False))
         elif char in ['m', 'p', 's', 'z']:
             tile_type = TileType(char)
-            for value in current_values:
-                tiles.append(Tile(tile_type, value))
+            for value, aka in current_values:
+                # 字牌不支持 0z（即 aka=True 的 z）
+                tiles.append(Tile(tile_type, value, aka=(aka and tile_type != TileType.HONOR)))
             current_values = []
         elif char == 'r':
             # 赤宝牌标记，下一个数字是赤宝

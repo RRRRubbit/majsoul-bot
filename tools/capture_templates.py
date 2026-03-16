@@ -18,6 +18,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from typing import Dict
 
 import cv2
 
@@ -28,6 +29,71 @@ sys.path.insert(0, str(_root))
 from majsoul_bot.vision.screen_capture import ScreenCapture
 from majsoul_bot.vision.regions import DEFAULT_REGIONS, ScreenRegions
 from majsoul_bot.vision.tile_recognizer import ALL_TILE_NAMES
+
+
+TILE_IMG_EXTS = (".png", ".jpg", ".jpeg")
+
+
+def _collect_tile_sample_stats(tiles_dir: Path) -> Dict[str, int]:
+    """统计每种牌已有样本数（支持新目录结构和旧平铺结构）。"""
+    stats: Dict[str, int] = {}
+    for name in ALL_TILE_NAMES:
+        count = 0
+
+        # 新结构：templates/tiles/<tile_name>/*
+        class_dir = tiles_dir / name
+        if class_dir.is_dir():
+            for p in class_dir.iterdir():
+                if p.is_file() and p.suffix.lower() in TILE_IMG_EXTS:
+                    count += 1
+
+        # 旧结构兜底：templates/tiles/<tile_name>.png
+        if count == 0:
+            for ext in TILE_IMG_EXTS:
+                if (tiles_dir / f"{name}{ext}").exists():
+                    count += 1
+                    break
+
+        stats[name] = count
+    return stats
+
+
+def _next_tile_sample_path(tiles_dir: Path, tile_name: str, ext: str = ".png") -> Path:
+    """获取某牌型下一个可用样本文件路径。"""
+    class_dir = tiles_dir / tile_name
+    class_dir.mkdir(parents=True, exist_ok=True)
+
+    idx = 1
+    while True:
+        candidate = class_dir / f"{tile_name}_{idx:04d}{ext}"
+        if not candidate.exists():
+            return candidate
+        idx += 1
+
+
+def migrate_flat_tile_templates(tiles_dir: str = "templates/tiles") -> int:
+    """
+    将旧平铺模板迁移到新目录结构：
+      templates/tiles/1m.png -> templates/tiles/1m/1m_0001.png
+    """
+    root = Path(tiles_dir)
+    if not root.exists():
+        return 0
+
+    moved = 0
+    for p in sorted(root.iterdir()):
+        if not p.is_file() or p.suffix.lower() not in TILE_IMG_EXTS:
+            continue
+
+        tile_name = p.stem.lower()
+        if tile_name not in ALL_TILE_NAMES:
+            continue
+
+        dst = _next_tile_sample_path(root, tile_name, ext=p.suffix.lower())
+        p.replace(dst)
+        moved += 1
+
+    return moved
 
 
 # ──────────────────────────────────────────────
@@ -46,6 +112,8 @@ def capture_tile_templates(output_dir: str = "templates/tiles"):
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
+    migrated = migrate_flat_tile_templates(str(out))
+
     sc = ScreenCapture()
     sc.find_game_window()
     regions = DEFAULT_REGIONS
@@ -55,14 +123,19 @@ def capture_tile_templates(output_dir: str = "templates/tiles"):
     print("=" * 52)
     print("说明：")
     print("  每次按 Enter 截图，然后输入每张牌的名称")
-    print("  牌名格式：1m~9m（万）/ 1p~9p（筒）/ 1s~9s（索）/ 1z~7z（字）")
+    print("  牌名格式：0m~9m（万，0m为赤五）/ 0p~9p（筒，0p为赤五）/ 0s~9s（索，0s为赤五）/ 1z~7z（字）")
     print("  输入 skip 跳过某张牌，输入 quit 退出")
-    print("  已保存的模板会被跳过（除非重新输入）")
+    print("  同一种牌会自动保存到同名子目录，便于积累多样本")
     print()
 
-    already_saved = {p.stem for p in out.glob("*.png")}
-    if already_saved:
-        print(f"  已有 {len(already_saved)} 个模板，重复的将被覆盖")
+    if migrated > 0:
+        print(f"  已自动迁移旧版平铺模板 {migrated} 张到分类子目录")
+
+    stats = _collect_tile_sample_stats(out)
+    covered = sum(1 for c in stats.values() if c > 0)
+    total_samples = sum(stats.values())
+    if total_samples > 0:
+        print(f"  当前已有 {covered}/{len(ALL_TILE_NAMES)} 类，共 {total_samples} 张样本")
     print()
 
     while True:
@@ -112,7 +185,7 @@ def capture_tile_templates(output_dir: str = "templates/tiles"):
             cv2.imwrite(tile_preview, tile_img)
 
             label = "摸牌" if is_drawn else f"手牌[{i}]"
-            name = input(f"  {label} 的牌名（1m/9z/skip/quit）> ").strip().lower()
+            name = input(f"  {label} 的牌名（如 0m/5m/9z/skip/quit）> ").strip().lower()
 
             if name == "quit":
                 print("\n退出捕获")
@@ -120,15 +193,17 @@ def capture_tile_templates(output_dir: str = "templates/tiles"):
             if name in ("skip", ""):
                 continue
             if name not in ALL_TILE_NAMES:
-                print(f"  ⚠ 无效牌名「{name}」，有效值如：1m, 5p, 7z")
+                print(f"  ⚠ 无效牌名「{name}」，有效值如：0m, 5p, 7z")
                 continue
 
-            save_path = out / f"{name}.png"
+            save_path = _next_tile_sample_path(out, name, ext=".png")
             cv2.imwrite(str(save_path), tile_img)
             print(f"  ✅ 已保存: {save_path}")
 
-        saved_count = len(list(out.glob("*.png")))
-        print(f"\n  当前共 {saved_count}/{len(ALL_TILE_NAMES)} 个牌型模板\n")
+        stats = _collect_tile_sample_stats(out)
+        covered = sum(1 for c in stats.values() if c > 0)
+        total_samples = sum(stats.values())
+        print(f"\n  当前共 {covered}/{len(ALL_TILE_NAMES)} 类，累计 {total_samples} 张样本\n")
 
     print("\n模板捕获完成！")
     print(f"模板目录: {out.resolve()}")

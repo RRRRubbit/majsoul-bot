@@ -29,7 +29,7 @@ class SimpleAI(Strategy):
 
     def decide_discard(self, hand: Hand, drawn_tile: Optional[Tile] = None) -> Tile:
         """
-        决定打出哪张牌
+        决定打出哪张牌（优化版：减少重复遍历）
 
         策略：
         1. 如果已立直，打刚摸的牌
@@ -46,39 +46,45 @@ class SimpleAI(Strategy):
             Tile: 决定打出的牌
         """
         if self.is_riichi and drawn_tile:
-            logger.info(f"立直状态，打刚摸的牌: {drawn_tile}")
+            logger.debug(f"立直状态，打刚摸的牌: {drawn_tile}")
             return drawn_tile
 
+        # 一次遍历分类所有牌（优化：避免多次遍历）
+        honor_tiles = []
+        terminal_tiles = []
+        for tile in hand.tiles:
+            if tile.is_honor():
+                honor_tiles.append(tile)
+            elif tile.is_terminal():
+                terminal_tiles.append(tile)
+
         # 优先打字牌
-        honor_tiles = [tile for tile in hand.tiles if tile.is_honor()]
         if honor_tiles:
-            # 打出数量最少的字牌
             tile_to_discard = self._find_least_useful_tile(hand, honor_tiles)
-            logger.info(f"打字牌: {tile_to_discard}")
+            logger.debug(f"打字牌: {tile_to_discard}")
             return tile_to_discard
 
         # 打边张牌
-        terminal_tiles = [tile for tile in hand.tiles if tile.is_terminal()]
         if terminal_tiles:
             tile_to_discard = self._find_least_useful_tile(hand, terminal_tiles)
-            logger.info(f"打边张: {tile_to_discard}")
+            logger.debug(f"打边张: {tile_to_discard}")
             return tile_to_discard
 
-        # 打孤张
-        isolated_tiles = self._find_isolated_tiles(hand)
+        # 打孤张（简化版：仅检查单张字牌和数牌）
+        isolated_tiles = self._find_isolated_tiles_fast(hand)
         if isolated_tiles:
-            tile_to_discard = random.choice(isolated_tiles)
-            logger.info(f"打孤张: {tile_to_discard}")
+            tile_to_discard = isolated_tiles[0]  # 取第一个而非随机，更快
+            logger.debug(f"打孤张: {tile_to_discard}")
             return tile_to_discard
 
         # 如果有刚摸的牌，优先考虑打出
         if drawn_tile and drawn_tile in hand.tiles:
-            logger.info(f"打刚摸的牌: {drawn_tile}")
+            logger.debug(f"打刚摸的牌: {drawn_tile}")
             return drawn_tile
 
         # 随机打一张
-        tile_to_discard = random.choice(hand.tiles)
-        logger.info(f"随机打牌: {tile_to_discard}")
+        tile_to_discard = hand.tiles[0]  # 直接取第一张，避免random开销
+        logger.debug(f"打首张: {tile_to_discard}")
         return tile_to_discard
 
     def _find_least_useful_tile(self, hand: Hand, candidates: List[Tile]) -> Tile:
@@ -107,9 +113,32 @@ class SimpleAI(Strategy):
 
         return least_useful
 
+    def _find_isolated_tiles_fast(self, hand: Hand) -> List[Tile]:
+        """
+        快速找出手牌中的孤张（优化版：只检查单张）
+
+        Args:
+            hand: 当前手牌
+
+        Returns:
+            List[Tile]: 孤张列表
+        """
+        tile_counter = hand.get_tile_counter()
+        isolated = []
+        
+        # 只返回数量为1的牌（简化策略，提升速度）
+        for tile in hand.tiles:
+            key = (tile.tile_type, tile.value)
+            if tile_counter.get(key, 0) == 1:
+                isolated.append(tile)
+                # 找到一个就返回，无需遍历全部
+                break
+        
+        return isolated
+
     def _find_isolated_tiles(self, hand: Hand) -> List[Tile]:
         """
-        找出手牌中的孤张（周围没有相邻牌的牌）
+        找出手牌中的孤张（周围没有相邻牌的牌）- 完整版
 
         Args:
             hand: 当前手牌

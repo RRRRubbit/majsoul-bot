@@ -14,13 +14,22 @@
 
 import asyncio
 import os
+import subprocess
 import sys
 import time
+from datetime import datetime
+import webbrowser
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
+
+try:
+    import pyautogui
+    HAS_PYAUTOGUI = True
+except Exception:
+    HAS_PYAUTOGUI = False
 
 # 确保项目根目录在 sys.path 中
 _project_root = Path(__file__).parent.parent
@@ -66,14 +75,22 @@ class VisionBot:
     """
 
     # 两次操作之间的最小冷却时间（秒），避免重复触发
-    ACTION_COOLDOWN = 4.0
+    ACTION_COOLDOWN = 0.5
 
     # 打牌之后的额外等待时间（秒），等游戏状态切换才允许再次打牌
     # 防止：点击打牌 → 状态未变 → 反复点击同一张牌
-    DISCARD_LOCK_TIMEOUT = 3.0
+    DISCARD_LOCK_TIMEOUT = 0.5
 
     # 主循环截图间隔（秒）
     CAPTURE_INTERVAL = 0.5
+
+    BROWSER_WINDOW_KEYWORDS = (
+        "edge",
+        "chrome",
+        "firefox",
+        "mahjong soul",
+        "雀魂",
+    )
 
     def __init__(
         self,
@@ -87,12 +104,34 @@ class VisionBot:
         button_threshold: float = 0.72,
         action_cooldown: float = 4.0,
         discard_lock_timeout: float = 3.0,
+        discard_lock_enabled: bool = False,
         nn_enabled: bool = True,
         nn_model_path: str = "models/tile_ann.xml",
         nn_labels_path: Optional[str] = None,
         nn_fusion_weight: float = 0.65,
         nn_min_confidence: float = 0.58,
         nn_top_k: int = 5,
+        nn_priority: bool = False,
+        yolo_enabled: bool = False,
+        yolo_model_path: Optional[str] = None,
+        yolo_conf_threshold: float = 0.5,
+        yolo_priority: bool = False,
+        auto_topmost: bool = True,
+        lock_resolution: bool = True,
+        lock_width: Optional[int] = None,
+        lock_height: Optional[int] = None,
+        browser_auto_open: bool = True,
+        browser_url: str = "https://game.maj-soul.com/1/",
+        browser_executable: str = "",
+        browser_wait_seconds: float = 2.0,
+        login_auto_fill: bool = False,
+        login_username: str = "",
+        login_password: str = "",
+        auto_collect_dataset: bool = False,
+        auto_collect_dir: str = "datasets/auto",
+        auto_collect_min_score: float = 0.93,
+        auto_collect_include_unknown: bool = False,
+        auto_collect_max_per_label: int = 2000,
         log_level: str = "INFO",
         log_file: str = "logs/vision_bot.log",
     ):
@@ -107,12 +146,30 @@ class VisionBot:
             button_threshold: 按钮模板匹配阈值
             action_cooldown: 两次操作间冷却时间（秒）
             discard_lock_timeout: 出牌后等待状态切换超时（秒）
+            discard_lock_enabled: 是否启用打牌锁（启用后会等待状态切换，防止重复点击）
             nn_enabled: 是否启用神经网络辅助识别
             nn_model_path: 神经网络模型路径
             nn_labels_path: 神经网络标签路径（None 时自动推断）
             nn_fusion_weight: 融合权重（越高越偏向 NN）
             nn_min_confidence: NN 兜底最小置信度
             nn_top_k: NN 候选数量
+            nn_priority: 是否启用 NN 优先识别策略
+            auto_topmost: 自动激活并置顶游戏窗口
+            lock_resolution: 是否锁定游戏窗口分辨率
+            lock_width: 锁定宽度（None 表示使用首次检测尺寸）
+            lock_height: 锁定高度（None 表示使用首次检测尺寸）
+            browser_auto_open: 启动时自动检测浏览器并导航网址
+            browser_url: 自动打开的网址
+            browser_executable: 浏览器可执行文件路径（空=系统默认浏览器）
+            browser_wait_seconds: 打开网址后的等待时间
+            login_auto_fill: 是否在检测到登录页后自动输入账号密码
+            login_username: 登录用户名
+            login_password: 登录密码
+            auto_collect_dataset: 是否运行时自动收集识别样本
+            auto_collect_dir: 自动收集样本目录
+            auto_collect_min_score: 自动收集最小置信度阈值（best_score）
+            auto_collect_include_unknown: 是否收集 unknown 牌位样本
+            auto_collect_max_per_label: 每个标签最多收集样本数（0=不限制）
             log_level: 日志等级
             log_file: 日志文件路径
         """
@@ -125,9 +182,33 @@ class VisionBot:
         self.CAPTURE_INTERVAL = capture_interval
         self.ACTION_COOLDOWN = action_cooldown
         self.DISCARD_LOCK_TIMEOUT = discard_lock_timeout
+        self.DISCARD_LOCK_ENABLED = bool(discard_lock_enabled)
+
+        self.browser_auto_open = bool(browser_auto_open)
+        self.browser_url = (browser_url or "").strip()
+        self.browser_executable = (browser_executable or "").strip()
+        self.browser_wait_seconds = float(browser_wait_seconds)
+        self.login_auto_fill = bool(login_auto_fill)
+        self.login_username = login_username or ""
+        self.login_password = login_password or ""
+
+        self.auto_collect_dataset = bool(auto_collect_dataset)
+        self.auto_collect_dir = Path(auto_collect_dir)
+        self.auto_collect_min_score = float(auto_collect_min_score)
+        self.auto_collect_include_unknown = bool(auto_collect_include_unknown)
+        self.auto_collect_max_per_label = int(auto_collect_max_per_label)
+        self._auto_collect_counts: Dict[str, int] = {}
+
+        if self.auto_collect_dataset:
+            self._init_auto_collect_counts()
 
         # ── 视觉组件 ──
-        self.screen_capture = ScreenCapture()
+        self.screen_capture = ScreenCapture(
+            auto_topmost=auto_topmost,
+            lock_resolution=lock_resolution,
+            lock_width=lock_width,
+            lock_height=lock_height,
+        )
         self.tile_recognizer = TileRecognizer(
             templates_dir=f"{templates_dir}/tiles",
             threshold=tile_threshold,
@@ -137,6 +218,11 @@ class VisionBot:
             nn_fusion_weight=nn_fusion_weight,
             nn_min_confidence=nn_min_confidence,
             nn_top_k=nn_top_k,
+            nn_priority=nn_priority,
+            yolo_enabled=yolo_enabled,
+            yolo_model_path=yolo_model_path,
+            yolo_conf_threshold=yolo_conf_threshold,
+            yolo_priority=yolo_priority,
         )
         self.game_state_detector = GameStateDetector(
             templates_dir=f"{templates_dir}/buttons",
@@ -175,6 +261,8 @@ class VisionBot:
     async def start(self):
         """启动视觉机器人"""
         self.logger.info("=" * 60)
+
+        await self._prepare_browser_and_login()
         self.logger.info("🀄 雀魂视觉机器人  (machine-vision mode)")
         self.logger.info("=" * 60)
 
@@ -193,6 +281,19 @@ class VisionBot:
         if found:
             w, h = self.screen_capture.window_size
             self.logger.info(f"✅ 游戏窗口已定位，尺寸 {w}×{h}")
+            # 主动触发 canvas 边界检测（结果会被缓存）
+            canvas_region = self.screen_capture.get_game_region()
+            browser_region = self.screen_capture._raw_browser_region()
+            if (canvas_region["width"] != browser_region["width"]
+                    or canvas_region["height"] != browser_region["height"]):
+                self.logger.info(
+                    f"🎮 Canvas 边界已识别: "
+                    f"偏移=({canvas_region['left'] - browser_region['left']}, "
+                    f"{canvas_region['top'] - browser_region['top']}), "
+                    f"尺寸={canvas_region['width']}×{canvas_region['height']}"
+                )
+            else:
+                self.logger.info("ℹ  Canvas 边界检测降级到完整浏览器窗口（未检测到独立 canvas 区域）")
         else:
             self.logger.warning("⚠  未找到游戏窗口，将捕获整个主显示器")
 
@@ -208,8 +309,20 @@ class VisionBot:
             f"button_threshold={self.game_state_detector.threshold:.2f}, "
             f"nn_fusion={self.tile_recognizer.nn_fusion_weight:.2f}, "
             f"nn_min_conf={self.tile_recognizer.nn_min_confidence:.2f}, "
-            f"cooldown={self.ACTION_COOLDOWN:.2f}s"
+            f"cooldown={self.ACTION_COOLDOWN:.2f}s, "
+            f"discard_lock={'ON' if self.DISCARD_LOCK_ENABLED else 'OFF'}, "
+            f"auto_topmost={self.screen_capture.auto_topmost}, "
+            f"lock_resolution={self.screen_capture.lock_resolution}, "
+            f"lock_size={self.screen_capture.lock_width or 0}x{self.screen_capture.lock_height or 0}"
         )
+        if self.auto_collect_dataset:
+            self.logger.info(
+                "自动样本收集: "
+                f"ON dir={self.auto_collect_dir.as_posix()} "
+                f"min_score={self.auto_collect_min_score:.2f} "
+                f"include_unknown={self.auto_collect_include_unknown} "
+                f"max_per_label={self.auto_collect_max_per_label}"
+            )
         self.logger.info("按 Ctrl+C 停止机器人")
         self.logger.info("-" * 60)
 
@@ -225,6 +338,119 @@ class VisionBot:
         finally:
             self.is_running = False
             self.logger.info("机器人已停止。")
+
+    async def _prepare_browser_and_login(self):
+        """启动前准备：自动打开浏览器、导航网址，并在登录页尝试自动填充账号密码。"""
+        if not self.browser_auto_open:
+            return
+
+        if not self.browser_url:
+            self.logger.warning("browser_auto_open 已启用，但 browser_url 为空，跳过自动导航")
+            return
+
+        # ── 若已存在雀魂游戏窗口，直接激活即可，无需重新打开 ──
+        if self.screen_capture.find_game_window():
+            self.logger.info("✅ 检测到雀魂窗口已存在，跳过浏览器自动打开")
+            self._try_focus_browser_window()
+            return
+
+        self.logger.info(f"🌐 启动浏览器导航: {self.browser_url}")
+        self._open_browser_url(self.browser_url)
+
+        wait_s = max(0.0, self.browser_wait_seconds)
+        if wait_s > 0:
+            await asyncio.sleep(wait_s)
+
+        self._try_focus_browser_window()
+
+        if not self.login_auto_fill:
+            return
+        if not HAS_PYAUTOGUI:
+            self.logger.warning("login_auto_fill 已启用，但 pyautogui 不可用，跳过自动填充")
+            return
+        if not (self.login_username and self.login_password):
+            self.logger.warning("login_auto_fill 已启用，但账号/密码为空，跳过自动填充")
+            return
+
+        title = self._get_active_window_title().lower()
+        if not self._looks_like_login_title(title):
+            self.logger.info("当前窗口标题未显示登录关键词，跳过自动填充账号密码")
+            return
+
+        await asyncio.sleep(0.4)
+        self._autofill_login_form()
+
+    def _open_browser_url(self, url: str):
+        """打开浏览器并跳转到指定 URL。"""
+        if self.browser_executable:
+            exe_path = Path(self.browser_executable)
+            if exe_path.exists():
+                try:
+                    subprocess.Popen([str(exe_path), url])
+                    return
+                except Exception as e:
+                    self.logger.warning(f"使用指定浏览器启动失败，回退系统默认浏览器: {e}")
+            else:
+                self.logger.warning(f"browser_executable 不存在: {self.browser_executable}，回退系统默认浏览器")
+
+        webbrowser.open(url, new=1)
+
+    def _try_focus_browser_window(self):
+        """尽量将浏览器窗口切到前台。"""
+        try:
+            found = self.screen_capture.find_game_window()
+            if found:
+                return
+        except Exception:
+            pass
+
+        gw_mod = getattr(sys.modules.get("majsoul_bot.vision.screen_capture"), "gw", None)
+        if gw_mod is None:
+            return
+        try:
+            wins = gw_mod.getAllWindows()
+            for win in wins:
+                title = (win.title or "").lower()
+                if any(k in title for k in self.BROWSER_WINDOW_KEYWORDS):
+                    if hasattr(win, "restore") and getattr(win, "isMinimized", False):
+                        win.restore()
+                    if hasattr(win, "activate"):
+                        win.activate()
+                    return
+        except Exception as e:
+            self.logger.debug(f"聚焦浏览器窗口失败: {e}")
+
+    @staticmethod
+    def _looks_like_login_title(title: str) -> bool:
+        return any(k in title for k in ("登录", "login", "sign in", "sign-in"))
+
+    def _get_active_window_title(self) -> str:
+        gw_mod = getattr(sys.modules.get("majsoul_bot.vision.screen_capture"), "gw", None)
+        if gw_mod is None:
+            return ""
+        try:
+            win = gw_mod.getActiveWindow()
+            return (win.title or "") if win else ""
+        except Exception:
+            return ""
+
+    def _autofill_login_form(self):
+        """基于键盘导航尝试填充登录表单。"""
+        try:
+            region = self.screen_capture.get_game_region()
+            cx = region["left"] + region["width"] // 2
+            cy = region["top"] + region["height"] // 2
+            pyautogui.click(cx, cy)
+            time.sleep(0.15)
+
+            pyautogui.press("tab")
+            pyautogui.write(self.login_username, interval=0.02)
+            pyautogui.press("tab")
+            pyautogui.write(self.login_password, interval=0.02)
+            pyautogui.press("enter")
+            self.logger.info("🔐 已尝试自动填充登录信息并提交")
+        except Exception as e:
+            self.logger.warning(f"自动填充登录表单失败: {e}")
 
     async def stop(self):
         """请求停止"""
@@ -271,12 +497,15 @@ class VisionBot:
         # ── 打牌锁管理（每帧运行，不受冷却限制）──
         # 游戏切换到非 MY_TURN_DISCARD 状态时立即解锁，
         # 确保下次轮到我出牌时能正常响应
-        if self._discard_pending and phase != GamePhase.MY_TURN_DISCARD:
+        if self.DISCARD_LOCK_ENABLED and self._discard_pending and phase != GamePhase.MY_TURN_DISCARD:
             self.logger.debug(f"[打牌锁] 状态切换为 {phase.value}，解锁")
             self._discard_pending = False
 
         # ── 全局冷却保护 ──
-        if time.time() - self._last_action_time < self.ACTION_COOLDOWN:
+        # 说明：操作阶段（吃/碰/杠/跳过）窗口很短，
+        # 若也受全局冷却限制，可能来不及点击“跳过”，导致看起来卡住。
+        # 因此 operation_available 不受该冷却限制。
+        if phase != GamePhase.OPERATION_AVAILABLE and time.time() - self._last_action_time < self.ACTION_COOLDOWN:
             return
 
         if phase == GamePhase.WIN_AVAILABLE:
@@ -287,7 +516,7 @@ class VisionBot:
             await self._on_operation(screenshot, state)
         elif phase == GamePhase.MY_TURN_DISCARD:
             # ── 打牌锁：已出牌但状态未切换时，跳过重复触发 ──
-            if self._discard_pending:
+            if self.DISCARD_LOCK_ENABLED and self._discard_pending:
                 elapsed = time.time() - self._discard_pending_since
                 if elapsed < self.DISCARD_LOCK_TIMEOUT:
                     self.logger.debug(
@@ -316,6 +545,7 @@ class VisionBot:
                 label = "自摸" if btn == "tsumo" else "荣和"
                 self.logger.info(f"  → 执行{label}")
                 await self.mouse.click_relative(rel_x, rel_y, self.screen_capture)
+                await self._move_mouse_to_safe_zone()
                 self._mark_action()
                 self.ai.on_round_start()  # 重置 AI 立直状态
                 return
@@ -329,6 +559,7 @@ class VisionBot:
             rel_x, rel_y = state.buttons["riichi"]
             self.logger.info("⚡ 立直！")
             await self.mouse.click_relative(rel_x, rel_y, self.screen_capture)
+            await self._move_mouse_to_safe_zone()
             self._mark_action()
         else:
             # 不立直则正常打牌
@@ -355,18 +586,21 @@ class VisionBot:
             rel_x, rel_y = skip_btn
             self.logger.info("⏭ 跳过操作")
             await self.mouse.click_relative(rel_x, rel_y, self.screen_capture)
+            await self._move_mouse_to_safe_zone()
             self._mark_action()
         else:
             self.logger.warning("找不到跳过按钮，等待超时")
 
     async def _on_discard(self, screenshot, state: DetectedState):
         """处理打牌阶段（核心决策）"""
-        # 1. 识别手牌
-        recognized = self.tile_recognizer.recognize_hand(
+        # 1) 扫描整个手牌行，自动检测实际手牌数（无需预设 13 张槽位）
+        recognized = self.tile_recognizer.recognize_hand_by_scan(
             screenshot,
-            hand_count=13,
             has_drawn_tile=state.has_drawn_tile,
         )
+        scan_hand_count = getattr(self.tile_recognizer, "last_scan_hand_count", len(recognized))
+        has_drawn = getattr(self.tile_recognizer, "last_scan_has_drawn", state.has_drawn_tile)
+
         self._recognized_tiles = recognized
 
         if not recognized:
@@ -374,10 +608,22 @@ class VisionBot:
             # 不重置冷却，允许下一帧立即重试
             return
         else:
-            self.logger.info(f"识别到手牌: {[name for name, _ in recognized]}")
+            self.logger.info(
+                f"识别到手牌({scan_hand_count}{'+1' if has_drawn else ''}): "
+                f"{[name for name, _ in recognized]}"
+            )
             self._log_candidate_tiles_for_unknown()
+            self._auto_collect_from_recognition(
+                screenshot,
+                hand_count=scan_hand_count,
+                has_drawn_tile=has_drawn,
+            )
         # 2. 根据识别结果更新 AI 手牌
-        drawn_tile = self._build_hand_from_recognized(recognized, state.has_drawn_tile)
+        drawn_tile = self._build_hand_from_recognized(
+            recognized,
+            has_drawn_tile=has_drawn,
+            hand_count=scan_hand_count,
+        )
 
         if self.hand.get_tile_count() == 0:
             # ── 无模板「位置模式」回退 ──
@@ -399,11 +645,13 @@ class VisionBot:
                     screenshot_shape=(sh, sw),
                 )
                 self.logger.info(f"   → 位置模式点击: ({pix_x}, {pix_y})")
+                await self._move_mouse_to_safe_zone()
             else:
                 self.logger.warning("   位置模式：找不到可点击的牌位，跳过")
             # 设置打牌锁：等待游戏状态切换才允许再次出牌
-            self._discard_pending = True
-            self._discard_pending_since = time.time()
+            if self.DISCARD_LOCK_ENABLED:
+                self._discard_pending = True
+                self._discard_pending_since = time.time()
             self._mark_action()
             return
 
@@ -429,9 +677,11 @@ class VisionBot:
                 self.screen_capture,
                 screenshot_shape=(sh, sw),
             )
+            await self._move_mouse_to_safe_zone()
             # 设置打牌锁：等待游戏状态切换才允许再次出牌
-            self._discard_pending = True
-            self._discard_pending_since = time.time()
+            if self.DISCARD_LOCK_ENABLED:
+                self._discard_pending = True
+                self._discard_pending_since = time.time()
             self._mark_action()
 
             # 5. 从 AI 手牌中移除打出的牌
@@ -441,6 +691,104 @@ class VisionBot:
         else:
             self.logger.error("无法确定点击位置")
             self._mark_action()  # 防止卡死
+
+    def _init_auto_collect_counts(self):
+        """初始化自动收集目录及各标签样本计数缓存。"""
+        try:
+            self.auto_collect_dir.mkdir(parents=True, exist_ok=True)
+            for p in self.auto_collect_dir.iterdir():
+                if p.is_dir():
+                    self._auto_collect_counts[p.name] = len(
+                        [f for f in p.iterdir() if f.is_file() and f.suffix.lower() in {".png", ".jpg", ".jpeg"}]
+                    )
+        except Exception as e:
+            self.logger.warning(f"初始化自动收集目录失败: {e}")
+            self.auto_collect_dataset = False
+
+    def _next_auto_collect_path(self, label: str) -> Path:
+        """返回某标签下下一个样本路径。"""
+        label_dir = self.auto_collect_dir / label
+        label_dir.mkdir(parents=True, exist_ok=True)
+        idx = self._auto_collect_counts.get(label, 0) + 1
+        self._auto_collect_counts[label] = idx
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        return label_dir / f"{label}_{ts}_{idx:06d}.png"
+
+    async def _move_mouse_to_safe_zone(self):
+        """将鼠标移到游戏画面正中央，远离手牌区域，避免悬停导致牌被抬起。"""
+        try:
+            region = self.screen_capture.get_game_region()
+            # 游戏窗口正中央 —— 棋盘中部无任何可交互牌区
+            safe_x = region["left"] + region["width"] // 2
+            safe_y = region["top"] + region["height"] // 2
+            await self.mouse.move_to(safe_x, safe_y, smooth=False)
+        except Exception as e:
+            self.logger.debug(f"移动鼠标到安全区失败: {e}")
+
+    def _auto_collect_from_recognition(
+        self,
+        screenshot: np.ndarray,
+        hand_count: int,
+        has_drawn_tile: bool,
+    ):
+        """按当前识别结果自动保存样本，用于后续训练。"""
+        if not self.auto_collect_dataset:
+            return
+
+        details = getattr(self.tile_recognizer, "last_recognition_details", None) or []
+        if not details:
+            return
+
+        tile_imgs = self.tile_recognizer.extract_tile_images(
+            screenshot,
+            hand_count=hand_count,
+            has_drawn_tile=has_drawn_tile,
+        )
+        if not tile_imgs:
+            return
+
+        saved = 0
+        for i, d in enumerate(details):
+            if i >= len(tile_imgs):
+                continue
+
+            name = str(d.get("recognized_name", "")).strip().lower()
+            accepted = bool(d.get("accepted", False))
+            score = float(d.get("best_score", 0.0))
+
+            if name.startswith("unknown_"):
+                if not self.auto_collect_include_unknown:
+                    continue
+                label = "unknown"
+            else:
+                label = name
+
+            if not label:
+                continue
+            if (not accepted) and label != "unknown":
+                continue
+            if score < self.auto_collect_min_score:
+                continue
+
+            if self.auto_collect_max_per_label > 0:
+                cur = self._auto_collect_counts.get(label, 0)
+                if cur >= self.auto_collect_max_per_label:
+                    continue
+
+            tile_img = tile_imgs[i]
+            if tile_img is None or tile_img.size == 0:
+                continue
+
+            try:
+                save_path = self._next_auto_collect_path(label)
+                ok = cv2.imwrite(str(save_path), tile_img)
+                if ok:
+                    saved += 1
+            except Exception as e:
+                self.logger.debug(f"自动收集样本保存失败(label={label}): {e}")
+
+        if saved > 0:
+            self.logger.debug(f"自动收集样本: 本帧新增 {saved} 张")
 
     def _log_candidate_tiles_for_unknown(self):
         """
@@ -496,18 +844,24 @@ class VisionBot:
 
     def _update_hand(self, screenshot, state: DetectedState):
         """从截图更新 AI 手牌（不返回 drawn_tile）"""
-        recognized = self.tile_recognizer.recognize_hand(
+        recognized = self.tile_recognizer.recognize_hand_by_scan(
             screenshot,
-            hand_count=13,
             has_drawn_tile=state.has_drawn_tile,
         )
+        scan_hand_count = getattr(self.tile_recognizer, "last_scan_hand_count", len(recognized))
+        has_drawn = getattr(self.tile_recognizer, "last_scan_has_drawn", state.has_drawn_tile)
         self._recognized_tiles = recognized
-        self._build_hand_from_recognized(recognized, state.has_drawn_tile)
+        self._build_hand_from_recognized(
+            recognized,
+            has_drawn_tile=has_drawn,
+            hand_count=scan_hand_count,
+        )
 
     def _build_hand_from_recognized(
         self,
         recognized: List[Tuple[str, Tuple[int, int]]],
         has_drawn_tile: bool,
+        hand_count: int,
     ) -> Optional[Tile]:
         """
         从识别结果构建 Hand 对象，并返回摸牌（若有）
@@ -518,7 +872,7 @@ class VisionBot:
         new_hand = Hand()
         drawn_tile: Optional[Tile] = None
 
-        hand_count = 13
+        hand_count = max(1, min(13, int(hand_count)))
         for i, (name, _pos) in enumerate(recognized):
             # 跳过位置占位名
             if name.startswith(("unknown_", "pos_")):
@@ -603,17 +957,27 @@ class VisionBot:
 
         # ── 视觉聚类路径 ──────────────────────────────────────
         if screenshot is not None:
-            tile_imgs = self.tile_recognizer.extract_tile_images(
-                screenshot,
-                hand_count=13,
-                has_drawn_tile=has_drawn_tile,
-            )
+            # 优先使用扫描到的真实 box 提取牌图（包含实际手牌数）
+            scan_boxes = getattr(self.tile_recognizer, "last_scan_boxes", None) or []
+            scan_hand_count = getattr(self.tile_recognizer, "last_scan_hand_count", 13)
+            tile_imgs = None
+            if scan_boxes and len(scan_boxes) == len(recognized):
+                tile_imgs = []
+                for x1, y1, x2, y2 in scan_boxes:
+                    img = screenshot[y1:y2, x1:x2]
+                    tile_imgs.append(img if img.size > 0 else None)
+            if not tile_imgs:
+                tile_imgs = self.tile_recognizer.extract_tile_images(
+                    screenshot,
+                    hand_count=scan_hand_count,
+                    has_drawn_tile=has_drawn_tile,
+                )
             if tile_imgs:
                 best_idx = self.tile_recognizer.find_best_discard_index(
                     tile_imgs, has_drawn_tile
                 )
                 if best_idx < len(recognized):
-                    tag = "摸牌" if best_idx >= 13 else f"第{best_idx}张"
+                    tag = "摸牌" if best_idx >= scan_hand_count else f"第{best_idx}张"
                     self.logger.info(
                         f"   🔍 视觉聚类选牌: {tag}（位置 {best_idx}）"
                     )
@@ -649,10 +1013,21 @@ class VisionBot:
         """保存带标注的调试截图"""
         try:
             debug_img = self.game_state_detector.visualize(screenshot, state)
-            # 同时标注手牌识别区域
-            debug_img = self.tile_recognizer.draw_hand_regions(
-                debug_img, hand_count=13, has_drawn=state.has_drawn_tile
-            )
+            # 优先使用扫描结果标注；无扫描结果时降级为固定区域标注
+            if self._recognized_tiles:
+                draw_fn = getattr(self.tile_recognizer, "draw_scan_results", None)
+                if callable(draw_fn):
+                    debug_img = draw_fn(debug_img, self._recognized_tiles)
+                else:
+                    scan_hand_count = getattr(self.tile_recognizer, "last_scan_hand_count", 13)
+                    has_drawn = getattr(self.tile_recognizer, "last_scan_has_drawn", state.has_drawn_tile)
+                    debug_img = self.tile_recognizer.draw_hand_regions(
+                        debug_img, hand_count=scan_hand_count, has_drawn=has_drawn
+                    )
+            else:
+                debug_img = self.tile_recognizer.draw_hand_regions(
+                    debug_img, hand_count=13, has_drawn=state.has_drawn_tile
+                )
             os.makedirs("logs", exist_ok=True)
             cv2.imwrite("logs/debug_latest.png", debug_img)
         except Exception as e:
@@ -688,6 +1063,11 @@ def parse_args():
     p.add_argument("--action-cooldown", type=float, default=None, help="操作冷却时长（秒，覆盖配置）")
     p.add_argument("--discard-lock-timeout", type=float, default=None, help="出牌锁超时时长（秒，覆盖配置）")
 
+    discard_lock_group = p.add_mutually_exclusive_group()
+    discard_lock_group.add_argument("--discard-lock", dest="discard_lock_enabled", action="store_true", help="启用打牌锁（覆盖配置）")
+    discard_lock_group.add_argument("--no-discard-lock", dest="discard_lock_enabled", action="store_false", help="关闭打牌锁（覆盖配置）")
+    p.set_defaults(discard_lock_enabled=None)
+
     nn_group = p.add_mutually_exclusive_group()
     nn_group.add_argument("--nn", dest="nn_enabled", action="store_true", help="启用 NN 识别（覆盖配置）")
     nn_group.add_argument("--no-nn", dest="nn_enabled", action="store_false", help="禁用 NN 识别（覆盖配置）")
@@ -698,6 +1078,19 @@ def parse_args():
     p.add_argument("--nn-fusion-weight", type=float, default=None, help="NN 融合权重（0~1，覆盖配置）")
     p.add_argument("--nn-min-confidence", type=float, default=None, help="NN 兜底最小置信度（0~1，覆盖配置）")
     p.add_argument("--nn-top-k", type=int, default=None, help="NN 候选数量（>=1，覆盖配置）")
+
+    topmost_group = p.add_mutually_exclusive_group()
+    topmost_group.add_argument("--topmost", dest="auto_topmost", action="store_true", help="自动激活并置顶窗口（覆盖配置）")
+    topmost_group.add_argument("--no-topmost", dest="auto_topmost", action="store_false", help="关闭自动置顶（覆盖配置）")
+    p.set_defaults(auto_topmost=None)
+
+    lock_group = p.add_mutually_exclusive_group()
+    lock_group.add_argument("--lock-resolution", dest="lock_resolution", action="store_true", help="锁定窗口分辨率（覆盖配置）")
+    lock_group.add_argument("--no-lock-resolution", dest="lock_resolution", action="store_false", help="关闭分辨率锁定（覆盖配置）")
+    p.set_defaults(lock_resolution=None)
+
+    p.add_argument("--lock-width", type=int, default=None, help="锁定窗口宽度（0/不传=首次尺寸）")
+    p.add_argument("--lock-height", type=int, default=None, help="锁定窗口高度（0/不传=首次尺寸）")
 
     return p.parse_args()
 
@@ -741,12 +1134,28 @@ def _build_bot_from_args(args) -> VisionBot:
         args.discard_lock_timeout,
         vision_cfg.discard_lock_timeout,
     )
+    discard_lock_enabled = _resolve_option(args.discard_lock_enabled, vision_cfg.discard_lock_enabled)
     nn_enabled = _resolve_option(args.nn_enabled, vision_cfg.nn_enabled)
     nn_model_path = _resolve_option(args.nn_model_path, vision_cfg.nn_model_path)
     nn_labels_path = _resolve_option(args.nn_labels_path, vision_cfg.nn_labels_path)
     nn_fusion_weight = _resolve_option(args.nn_fusion_weight, vision_cfg.nn_fusion_weight)
     nn_min_confidence = _resolve_option(args.nn_min_confidence, vision_cfg.nn_min_confidence)
     nn_top_k = _resolve_option(args.nn_top_k, vision_cfg.nn_top_k)
+    nn_priority = vision_cfg.nn_priority
+    auto_topmost = _resolve_option(args.auto_topmost, vision_cfg.auto_topmost)
+    lock_resolution = _resolve_option(args.lock_resolution, vision_cfg.lock_resolution)
+    lock_width = _resolve_option(args.lock_width, vision_cfg.lock_width)
+    lock_height = _resolve_option(args.lock_height, vision_cfg.lock_height)
+    browser_auto_open = vision_cfg.browser_auto_open
+    browser_url = vision_cfg.browser_url
+    browser_executable = vision_cfg.browser_executable
+    browser_wait_seconds = vision_cfg.browser_wait_seconds
+    login_auto_fill = vision_cfg.login_auto_fill
+    auto_collect_dataset = vision_cfg.auto_collect_dataset
+    auto_collect_dir = vision_cfg.auto_collect_dir
+    auto_collect_min_score = vision_cfg.auto_collect_min_score
+    auto_collect_include_unknown = vision_cfg.auto_collect_include_unknown
+    auto_collect_max_per_label = vision_cfg.auto_collect_max_per_label
 
     if isinstance(nn_labels_path, str) and not nn_labels_path.strip():
         nn_labels_path = None
@@ -769,6 +1178,19 @@ def _build_bot_from_args(args) -> VisionBot:
         raise ValueError("参数错误：nn_top_k 必须 >= 1")
     if action_cooldown < 0 or discard_lock_timeout < 0:
         raise ValueError("参数错误：冷却时间参数不能小于 0")
+    if int(lock_width) < 0 or int(lock_height) < 0:
+        raise ValueError("参数错误：lock_width/lock_height 不能小于 0")
+    if (int(lock_width) == 0) ^ (int(lock_height) == 0):
+        raise ValueError("参数错误：lock_width 和 lock_height 需同时设置（或同时为 0）")
+    if browser_wait_seconds < 0:
+        raise ValueError("参数错误：browser_wait_seconds 不能小于 0")
+    if not (0.0 <= float(auto_collect_min_score) <= 1.0):
+        raise ValueError("参数错误：auto_collect_min_score 必须在 [0, 1] 区间")
+    if int(auto_collect_max_per_label) < 0:
+        raise ValueError("参数错误：auto_collect_max_per_label 不能小于 0")
+
+    lock_width_arg = None if int(lock_width) == 0 else int(lock_width)
+    lock_height_arg = None if int(lock_height) == 0 else int(lock_height)
 
     return VisionBot(
         debug=debug,
@@ -781,12 +1203,30 @@ def _build_bot_from_args(args) -> VisionBot:
         button_threshold=button_threshold,
         action_cooldown=action_cooldown,
         discard_lock_timeout=discard_lock_timeout,
+        discard_lock_enabled=bool(discard_lock_enabled),
         nn_enabled=bool(nn_enabled),
         nn_model_path=nn_model_path,
         nn_labels_path=nn_labels_path,
         nn_fusion_weight=float(nn_fusion_weight),
         nn_min_confidence=float(nn_min_confidence),
         nn_top_k=int(nn_top_k),
+        nn_priority=bool(nn_priority),
+        auto_topmost=bool(auto_topmost),
+        lock_resolution=bool(lock_resolution),
+        lock_width=lock_width_arg,
+        lock_height=lock_height_arg,
+        browser_auto_open=bool(browser_auto_open),
+        browser_url=str(browser_url or "").strip(),
+        browser_executable=str(browser_executable or "").strip(),
+        browser_wait_seconds=float(browser_wait_seconds),
+        login_auto_fill=bool(login_auto_fill),
+        login_username=settings.account.username,
+        login_password=settings.account.password,
+        auto_collect_dataset=bool(auto_collect_dataset),
+        auto_collect_dir=str(auto_collect_dir),
+        auto_collect_min_score=float(auto_collect_min_score),
+        auto_collect_include_unknown=bool(auto_collect_include_unknown),
+        auto_collect_max_per_label=int(auto_collect_max_per_label),
         log_level=settings.logging.level,
         log_file=settings.logging.file,
     )
